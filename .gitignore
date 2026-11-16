@@ -1,0 +1,13 @@
+build/
+_deps/
+*.uf2
+*.elf
+*.bin
+*.hex
+*.dis
+*.map
+*.o
+*.obj
+*.d
+.vscode/
+.idea/

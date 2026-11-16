@@ -1,0 +1,82 @@
+;
+; Quadrature decoder for PIO. Full x4 counting (CPR = 4 x PPR).
+; Counter lives in register X, every change is pushed to RX FIFO
+; and picked up by DMA. Jump-table technique after Adam Green.
+;
+; Jump table: 16 entries, index = (prev << 2) | curr,
+; pair bits: msb = A, lsb = B. Impossible transitions
+; (both bits changed at once = glitch) go back to start.
+;
+
+.program quadrature_encoder
+
+.origin 0    ; must start at 0: jump table is entered via mov pc, isr
+
+    jmp start     ; 00->00
+    jmp minus1    ; 00->01
+    jmp plus1     ; 00->10
+    jmp start     ; 00->11  glitch
+    jmp plus1     ; 01->00
+    jmp start     ; 01->01
+    jmp start     ; 01->10  glitch
+    jmp minus1    ; 01->11
+    jmp minus1    ; 10->00
+    jmp start     ; 10->01  glitch
+    jmp start     ; 10->10
+    jmp plus1     ; 10->11
+    jmp start     ; 11->00  glitch
+    jmp plus1     ; 11->01
+    jmp minus1    ; 11->10
+    jmp start     ; 11->11
+
+.wrap_target
+start:
+    mov isr, null
+    in y, 2           ; prev state -> ISR[1:0]
+    mov y, pins
+    in y, 2           ; curr state -> ISR[3:2]
+    mov pc, isr       ; dispatch into the jump table
+
+minus1:
+    jmp x-- output    ; decrement X (32-bit two's complement counter)
+    jmp output
+
+plus1:
+    mov x, ~x         ; increment: X = ~(~X - 1)
+    jmp x-- next2
+next2:
+    mov x, ~x
+
+output:
+    mov isr, x
+    push noblock
+.wrap
+
+% c-sdk {
+static inline void quadrature_encoder_program_init(PIO pio, uint sm,
+                                                   uint offset, uint pin,
+                                                   int initial_value) {
+    pio_sm_config c = quadrature_encoder_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin);   // pin = A, pin + 1 = B
+    sm_config_set_in_shift(&c, false, false, 0);  // shift LEFT into ISR
+    sm_config_set_clkdiv(&c, 1.0f);   // full sysclk
+
+    pio_gpio_init(pio, pin);
+    pio_gpio_init(pio, pin + 1);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 2, false);   // both inputs
+    gpio_pull_up(pin);
+    gpio_pull_up(pin + 1);
+
+    pio_sm_set_enabled(pio, sm, false);
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_init(pio, sm, offset + quadrature_encoder_wrap_target, &c);
+
+    // Load X with initial (biased) value
+    pio_sm_put_blocking(pio, sm, (uint32_t)initial_value);
+    pio_sm_exec(pio, sm, pio_encode_pull(true, true));
+    pio_sm_exec(pio, sm, pio_encode_mov(pio_x, pio_osr));
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + quadrature_encoder_wrap_target));
+
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
